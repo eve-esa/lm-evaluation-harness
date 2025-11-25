@@ -127,6 +127,7 @@ class LocalCompletionsAPI(TemplateAPI):
         if not isinstance(outputs, list):
             outputs = [outputs]
         for out in outputs:
+            print(out)
             tmp = [None] * len(out["choices"])
             for choices in out["choices"]:
                 tmp[choices["index"]] = choices["text"]
