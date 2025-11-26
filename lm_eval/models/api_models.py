@@ -598,27 +598,60 @@ class TemplateAPI(TemplateLM):
                     f"Retry attempt {retry_state.attempt_number}"
                 ),
             )(self.amodel_call)
-            # Create tasks for each batch of request
-            tasks = [
-                asyncio.create_task(
-                    retry_(
-                        session=session,
-                        sem=sem,
-                        messages=message,
-                        cache_keys=cache_key,
-                        generate=generate,
-                        ctxlens=ctxlen,
-                        **kwargs,
+            # Create tasks for each batch of request and track batch sizes
+            tasks = []
+            batch_sizes = []
+            for message, cache_key, ctxlen in zip(
+                chunks(requests, n=self._batch_size),
+                chunks(cache_keys, n=self._batch_size),
+                chunks(ctxlens, n=self._batch_size),
+            ):
+                # Convert to list if needed and track the actual batch size
+                if not isinstance(message, list):
+                    message = list(message)
+                if not isinstance(cache_key, list):
+                    cache_key = list(cache_key)
+                if not isinstance(ctxlen, list):
+                    ctxlen = list(ctxlen)
+
+                batch_sizes.append(len(message))
+                tasks.append(
+                    asyncio.create_task(
+                        retry_(
+                            session=session,
+                            sem=sem,
+                            messages=message,
+                            cache_keys=cache_key,
+                            generate=generate,
+                            ctxlens=ctxlen,
+                            **kwargs,
+                        )
                     )
                 )
-                for message, cache_key, ctxlen in zip(
-                    chunks(requests, n=self._batch_size),
-                    chunks(cache_keys, n=self._batch_size),
-                    chunks(ctxlens, n=self._batch_size),
-                )
-            ]
 
-            return await tqdm_asyncio.gather(*tasks, desc="Requesting API")
+            # Use return_exceptions=True to handle timeout errors gracefully
+            results = await tqdm_asyncio.gather(*tasks, desc="Requesting API", return_exceptions=True)
+
+            # Post-process results to replace exceptions with default values
+            processed_results = []
+            for i, result in enumerate(results):
+                if isinstance(result, (asyncio.TimeoutError, asyncio.CancelledError, Exception)):
+                    eval_logger.error(
+                        f"Request batch {i+1}/{len(results)} failed with {type(result).__name__}: {result}. "
+                        "Returning default value (empty response for generation, -inf for loglikelihood)."
+                    )
+                    # Use the tracked batch size for this specific batch
+                    batch_size = batch_sizes[i] if i < len(batch_sizes) else self._batch_size
+                    if generate:
+                        # For generation tasks, return empty strings
+                        processed_results.append([""] * batch_size)
+                    else:
+                        # For loglikelihood tasks, return (-inf, False) tuples
+                        processed_results.append([(-float('inf'), False)] * batch_size)
+                else:
+                    processed_results.append(result)
+
+            return processed_results
 
     def _loglikelihood_tokens(self, requests, **kwargs) -> List[Tuple[float, bool]]:
         assert self.tokenizer is not None, (
