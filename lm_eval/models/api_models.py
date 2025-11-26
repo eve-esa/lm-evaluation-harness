@@ -630,9 +630,22 @@ class TemplateAPI(TemplateLM):
                 )
 
             # Use return_exceptions=True to handle timeout errors gracefully
-            # Note: tqdm_asyncio.gather doesn't support return_exceptions, so use asyncio.gather directly
-            eval_logger.info(f"Requesting {len(tasks)} batches from API...")
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Wrap tasks with progress tracking
+            pbar = tqdm(total=len(tasks), desc="Requesting API")
+
+            async def track_progress(task):
+                try:
+                    result = await task
+                    pbar.update(1)
+                    return result
+                except Exception as e:
+                    pbar.update(1)
+                    raise e
+
+            # Wrap all tasks with progress tracking
+            tracked_tasks = [track_progress(task) for task in tasks]
+            results = await asyncio.gather(*tracked_tasks, return_exceptions=True)
+            pbar.close()
 
             # Post-process results to replace exceptions with default values
             processed_results = []
