@@ -640,7 +640,7 @@ class TemplateAPI(TemplateLM):
                     return result
                 except Exception as e:
                     pbar.update(1)
-                    raise e
+                    return e
 
             # Wrap all tasks with progress tracking
             tracked_tasks = [track_progress(task) for task in tasks]
