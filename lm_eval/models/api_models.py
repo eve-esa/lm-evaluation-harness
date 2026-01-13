@@ -274,7 +274,11 @@ class TemplateAPI(TemplateLM):
                 "non-tokenized chat requests are only supported with batch_size=1"
             )
             # list[dict["role":..., "content":...],...]
-            return json.loads(messages[0].prompt)
+            chat_messages = json.loads(messages[0].prompt)
+            # Remove 'type' field from all messages (if present) as many APIs don't support it
+            for msg in chat_messages:
+                msg.pop("type", None)
+            return chat_messages
 
         if not self.tokenized_requests:
             # if messages are tokenized:
