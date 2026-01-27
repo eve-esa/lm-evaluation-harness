@@ -512,6 +512,8 @@ class TemplateAPI(TemplateLM):
             seed=self._seed,
             **kwargs,
         )
+        eval_logger.info(f"[API_MODELS] Sending POST to {self.base_url}")
+        eval_logger.info(f"[API_MODELS] Payload being sent: {payload}")
         cache_method = "generate_until" if generate else "loglikelihood"
         acquired = await sem.acquire()
         try:

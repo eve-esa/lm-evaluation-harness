@@ -20,7 +20,7 @@ class EveAPI(TemplateAPI):
 
     Example usage:
         lm_eval --model eve-api \
-                --model_args "email=user@example.com,password=mypass,base_url=https://api.eve.com,public_collections=['qwen-512-filtered','wikipedia_eo_dump'],k=5,threshold=0.5" \
+                --model_args "email=user@example.com,password=mypass,base_url=https://api.eve.com,public_collections=['qwen-512-filtered','wikipedia-512'],k=5,threshold=0.5" \
                 --tasks mmlu
     """
 
@@ -87,7 +87,7 @@ class EveAPI(TemplateAPI):
                     # If all parsing fails, treat as single item
                     self.public_collections = [public_collections]
         elif public_collections is None:
-            self.public_collections = ["qwen-512-filtered", "wikipedia_eo_dump"]
+            self.public_collections = ["qwen-512-filtered", "wikipedia-512"]
         else:
             self.public_collections = public_collections
 
@@ -188,7 +188,8 @@ class EveAPI(TemplateAPI):
             "threshold": self.threshold,
         }
 
-        eval_logger.debug(f"Created Eve API payload: {payload}")
+        eval_logger.info(f"[EVE_API] Created payload with public_collections: {self.public_collections}")
+        eval_logger.info(f"[EVE_API] Full payload: {payload}")
         return payload
 
     @staticmethod
