@@ -72,26 +72,40 @@ class EveAPI(TemplateAPI):
 
         # Store RAG parameters
         # Handle case where public_collections comes as a string (from command-line parsing)
-        eval_logger.info(f"[EVE_API INIT] Received public_collections type: {type(public_collections)}, value: {repr(public_collections)}")
+        eval_logger.info(
+            f"[EVE_API INIT] Received public_collections type: {type(public_collections)}, value: {repr(public_collections)}"
+        )
 
         if public_collections is None:
-            eval_logger.info("[EVE_API INIT] public_collections is None, using defaults")
+            eval_logger.info(
+                "[EVE_API INIT] public_collections is None, using defaults"
+            )
             self.public_collections = ["qwen-512-filtered", "wikipedia-512"]
         elif isinstance(public_collections, str):
-            eval_logger.info(f"[EVE_API INIT] public_collections is a string, attempting to parse")
+            eval_logger.info(
+                f"[EVE_API INIT] public_collections is a string, attempting to parse"
+            )
             # Check if it's a pipe-separated list (our custom format to avoid comma conflicts)
-            if '|' in public_collections:
-                self.public_collections = [c.strip() for c in public_collections.split('|') if c.strip()]
-                eval_logger.info(f"[EVE_API INIT] Split pipe-separated string into list: {self.public_collections}")
+            if "|" in public_collections:
+                self.public_collections = [
+                    c.strip() for c in public_collections.split("|") if c.strip()
+                ]
+                eval_logger.info(
+                    f"[EVE_API INIT] Split pipe-separated string into list: {self.public_collections}"
+                )
             else:
                 # Single collection name
                 eval_logger.info(f"[EVE_API INIT] Using as single collection")
                 self.public_collections = [public_collections]
         elif isinstance(public_collections, list):
-            eval_logger.info(f"[EVE_API INIT] public_collections is already a list, using as-is: {public_collections}")
+            eval_logger.info(
+                f"[EVE_API INIT] public_collections is already a list, using as-is: {public_collections}"
+            )
             self.public_collections = public_collections
         else:
-            eval_logger.info(f"[EVE_API INIT] public_collections is a {type(public_collections)}, using as-is")
+            eval_logger.info(
+                f"[EVE_API INIT] public_collections is a {type(public_collections)}, using as-is"
+            )
             self.public_collections = public_collections
 
         self.k = int(k)
@@ -184,16 +198,20 @@ class EveAPI(TemplateAPI):
             query = str(messages)
 
         # Create Eve API payload
-        eval_logger.info(f"[EVE_API PAYLOAD] self.public_collections type: {type(self.public_collections)}, value: {repr(self.public_collections)}")
+        eval_logger.info(
+            f"[EVE_API PAYLOAD] self.public_collections type: {type(self.public_collections)}, value: {repr(self.public_collections)}"
+        )
 
         payload = {
             "query": query,
             "public_collections": self.public_collections,
             "k": self.k,
-            "threshold": self.threshold,
+            "score_threshold": self.threshold,
         }
 
-        eval_logger.info(f"[EVE_API] Created payload with public_collections: {self.public_collections}")
+        eval_logger.info(
+            f"[EVE_API] Created payload with public_collections: {self.public_collections}"
+        )
         eval_logger.info(f"[EVE_API] Full payload: {payload}")
         return payload
 
@@ -281,8 +299,8 @@ class EveAPI(TemplateAPI):
         *,
         generate: bool = True,
         cache_keys: list = None,
-        ctxlens = None,
-        gen_kwargs = None,
+        ctxlens=None,
+        gen_kwargs=None,
         **kwargs,
     ):
         """
