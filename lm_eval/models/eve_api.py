@@ -207,6 +207,7 @@ class EveAPI(TemplateAPI):
             "public_collections": self.public_collections,
             "k": self.k,
             "score_threshold": self.threshold,
+            "llm_type": "main",
         }
 
         eval_logger.info(
