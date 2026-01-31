@@ -332,10 +332,11 @@ class EveAPI(TemplateAPI):
                 eval_logger.warning(
                     "Received 401 Unauthorized. Refreshing token and retrying..."
                 )
+                # Save current token before acquiring lock
+                old_token = self._token
                 async with self._token_lock:
                     # Check if another coroutine already refreshed the token
-                    old_token = self._token
-                    if old_token == self._token or self._token is None:
+                    if self._token == old_token or self._token is None:
                         # Refresh the token
                         self.refresh_token()
                         eval_logger.info("Token refreshed successfully")
