@@ -1,10 +1,15 @@
+import asyncio
+import copy
+import json
 import logging
 import os
 import requests
+import threading
 from typing import Any, Dict, List, Optional, Union
 
+from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
-from .api_models import TemplateAPI
+from .api_models import JsonChatStr, TemplateAPI
 
 
 eval_logger = logging.getLogger(__name__)
@@ -114,6 +119,10 @@ class EveAPI(TemplateAPI):
         # Store authentication token (will be lazy-loaded)
         self._token = None
         self._token_lock = None  # Will be set to asyncio.Lock() when needed
+
+        # Thread-safe storage for API responses (for logging full responses)
+        self._response_storage = {}
+        self._storage_lock = threading.Lock()
 
         eval_logger.info(f"Initialized Eve API model with base_url={self.base_url}")
         eval_logger.info(
@@ -292,6 +301,97 @@ class EveAPI(TemplateAPI):
         """
         return {"Authorization": f"Bearer {self.access_token}"}
 
+    def model_call(
+        self,
+        messages: Union[List[List[int]], List[str], List[JsonChatStr]],
+        *,
+        generate: bool = True,
+        gen_kwargs: Optional[Dict] = None,
+        **kwargs,
+    ) -> Optional[dict]:
+        """
+        Override synchronous model_call to store full API responses.
+
+        This is used when num_concurrent <= 1 (synchronous execution).
+        """
+        # !!! Copy: shared dict for each request, need new object !!!
+        gen_kwargs = copy.deepcopy(gen_kwargs)
+
+        # Create payload
+        payload = self._create_payload(
+            self.create_message(messages),
+            generate=generate,
+            gen_kwargs=gen_kwargs,
+            seed=self._seed,
+            eos=self.eos_string,
+            **kwargs,
+        )
+
+        eval_logger.info(f"[EVE_API SYNC] Sending POST to {self.base_url}")
+        eval_logger.info(f"[EVE_API SYNC] Payload: {payload}")
+
+        try:
+            response = requests.post(
+                self.base_url,
+                json=payload,
+                headers=self.header,
+                verify=self.verify_certificate,
+                timeout=self.timeout,
+            )
+
+            if not response.ok:
+                # Handle 401 - token expired
+                if response.status_code == 401:
+                    eval_logger.warning(
+                        "Received 401 Unauthorized. Refreshing token and retrying..."
+                    )
+                    self.refresh_token()
+
+                    # Retry with new token
+                    response = requests.post(
+                        self.base_url,
+                        json=payload,
+                        headers=self.header,  # Will use new token
+                        verify=self.verify_certificate,
+                        timeout=self.timeout,
+                    )
+                    response.raise_for_status()
+                else:
+                    eval_logger.warning(
+                        f"API request failed with error message: {response.text}. Retrying..."
+                    )
+                    response.raise_for_status()
+
+            outputs = response.json()
+
+            # Store the full API response for later logging
+            # Use the raw messages as the storage key
+            # Extract the string from messages
+            if messages and len(messages) > 0:
+                # messages could be a list of JsonChatStr or strings
+                message = messages[0]
+                if hasattr(message, 'prompt'):
+                    storage_key = message.prompt
+                else:
+                    storage_key = str(message)
+
+                with self._storage_lock:
+                    # Store both request payload and full response
+                    self._response_storage[storage_key] = {
+                        "request": copy.deepcopy(payload),
+                        "response": copy.deepcopy(outputs) if isinstance(outputs, dict) else outputs,
+                    }
+                eval_logger.info(
+                    f"[EVE_API SYNC] Stored full response for storage_key type={type(storage_key).__name__}, "
+                    f"first 100 chars: {str(storage_key)[:100]}, total stored: {len(self._response_storage)}"
+                )
+
+            return outputs
+
+        except requests.exceptions.RequestException as e:
+            eval_logger.error(f"[EVE_API SYNC] Request failed: {e}")
+            raise
+
     async def amodel_call(
         self,
         session,
@@ -305,54 +405,236 @@ class EveAPI(TemplateAPI):
         **kwargs,
     ):
         """
-        Override amodel_call to handle 401 errors and refresh token.
+        Override amodel_call to handle 401 errors, refresh token, and store full API responses.
         """
-        import asyncio
         from aiohttp import ClientResponseError
 
         # Initialize token lock if needed
         if self._token_lock is None:
             self._token_lock = asyncio.Lock()
 
-        try:
-            # Try the request with current token
-            return await super().amodel_call(
-                session=session,
-                sem=sem,
-                messages=messages,
-                generate=generate,
-                cache_keys=cache_keys,
-                ctxlens=ctxlens,
-                gen_kwargs=gen_kwargs,
-                **kwargs,
-            )
-        except ClientResponseError as e:
-            # If we get a 401, refresh the token and retry once
-            if e.status == 401:
-                eval_logger.warning(
-                    "Received 401 Unauthorized. Refreshing token and retrying..."
-                )
-                # Save current token before acquiring lock
-                old_token = self._token
-                async with self._token_lock:
-                    # Check if another coroutine already refreshed the token
-                    if self._token == old_token or self._token is None:
-                        # Refresh the token
-                        self.refresh_token()
-                        eval_logger.info("Token refreshed successfully")
+        # Create payload
+        gen_kwargs_copy = copy.deepcopy(gen_kwargs)
+        payload = self._create_payload(
+            self.create_message(messages),
+            generate=generate,
+            gen_kwargs=gen_kwargs_copy,
+            seed=self._seed,
+            **kwargs,
+        )
 
-                # Retry the request with new token
-                eval_logger.info("Retrying request with new token")
-                return await super().amodel_call(
-                    session=session,
-                    sem=sem,
-                    messages=messages,
-                    generate=generate,
-                    cache_keys=cache_keys,
+        eval_logger.info(f"[EVE_API] Sending POST to {self.base_url}")
+        eval_logger.info(f"[EVE_API] Payload being sent: {payload}")
+
+        cache_method = "generate_until" if generate else "loglikelihood"
+        acquired = await sem.acquire()
+
+        try:
+            async with session.post(
+                self.base_url,
+                json=payload,
+                headers=self.header,
+            ) as response:
+                if not response.ok:
+                    # Handle 401 - token expired
+                    if response.status == 401:
+                        error_text = await response.text()
+                        eval_logger.warning(
+                            f"Received 401 Unauthorized. Refreshing token and retrying..."
+                        )
+
+                        # Save current token before acquiring lock
+                        old_token = self._token
+                        async with self._token_lock:
+                            # Check if another coroutine already refreshed the token
+                            if self._token == old_token or self._token is None:
+                                # Refresh the token (synchronous call)
+                                self.refresh_token()
+                                eval_logger.info("Token refreshed successfully")
+
+                        # Retry with new token
+                        eval_logger.info("Retrying request with new token")
+                        async with session.post(
+                            self.base_url,
+                            json=payload,
+                            headers=self.header,  # Will use new token
+                        ) as retry_response:
+                            retry_response.raise_for_status()
+                            outputs = await retry_response.json()
+                    else:
+                        # Other errors
+                        error_text = await response.text()
+                        eval_logger.warning(
+                            f"API request failed! Status code: {response.status}, "
+                            f"Response text: {error_text}. Retrying..."
+                        )
+                        response.raise_for_status()
+                else:
+                    # Success - get the response
+                    outputs = await response.json()
+
+            # Parse the response to get answers
+            answers = (
+                self.parse_generations(outputs=outputs)
+                if generate
+                else self.parse_logprobs(
+                    outputs=outputs,
+                    tokens=messages,
                     ctxlens=ctxlens,
-                    gen_kwargs=gen_kwargs,
-                    **kwargs,
                 )
+            )
+
+            # Store the full API response for later logging
+            # Use the context (first element of cache_key) as the storage key
+            # Note: cache_keys are tuples of (context, gen_kwargs), but gen_kwargs is a dict
+            # and can't be used as a dict key. Context alone is sufficient for uniqueness.
+            if cache_keys:
+                # Store response for each cache key
+                # Note: For Eve API, we typically have one message per request
+                # but we handle multiple just in case
+                for idx, (res, cache_key) in enumerate(zip(answers, cache_keys)):
+                    try:
+                        # Extract context from cache_key tuple (context, gen_kwargs)
+                        if isinstance(cache_key, tuple) and len(cache_key) >= 1:
+                            storage_key = cache_key[0]
+                        else:
+                            storage_key = cache_key
+
+                        # Convert JsonChatStr to string for storage if needed
+                        # JsonChatStr is a NamedTuple with a 'prompt' field
+                        if hasattr(storage_key, 'prompt'):
+                            storage_key = storage_key.prompt
+
+                        with self._storage_lock:
+                            # Store both request payload and full response
+                            # Use storage_key as key (it's unique per request)
+                            self._response_storage[storage_key] = {
+                                "request": copy.deepcopy(payload),
+                                "response": (
+                                    copy.deepcopy(outputs) if isinstance(outputs, dict) else outputs
+                                ),
+                            }
+                        eval_logger.info(
+                            f"[EVE_API] Stored full response for storage_key type={type(storage_key).__name__}, "
+                            f"first 100 chars: {str(storage_key)[:100]}, total stored: {len(self._response_storage)}"
+                        )
+                    except Exception as e:
+                        eval_logger.error(f"[EVE_API] Error storing response for cache_key {idx}: {e}")
+                        import traceback
+                        eval_logger.error(traceback.format_exc())
+
+                    # Add to cache
+                    self.cache_hook.add_partial(cache_method, cache_key, res)
             else:
-                # Re-raise other errors
-                raise
+                # Fallback: store by query if no cache_keys (shouldn't happen in practice)
+                query = payload.get("query", "")
+                with self._storage_lock:
+                    self._response_storage[query] = {
+                        "request": copy.deepcopy(payload),
+                        "response": (
+                            copy.deepcopy(outputs) if isinstance(outputs, dict) else outputs
+                        ),
+                    }
+                eval_logger.warning(
+                    f"[EVE_API] No cache_keys provided, storing by query (first 100 chars): {query[:100]}"
+                )
+
+            return answers
+
+        except BaseException as e:
+            # If outputs is not defined, define it here for logging
+            if "outputs" not in locals():
+                outputs = None
+            eval_logger.error(f"Exception: {repr(e)}, {outputs}, retrying.")
+            raise e
+        finally:
+            if acquired:
+                sem.release()
+
+    def generate_until(
+        self, requests: List[Instance], disable_tqdm: bool = False
+    ) -> List[str]:
+        """
+        Override generate_until to attach full API responses to instances for logging.
+
+        This ensures that the full Eve API response (including retrieved documents,
+        scores, etc.) is saved to the samples JSONL file and uploaded to wandb.
+        """
+        # Call parent method to get results
+        results = super().generate_until(requests, disable_tqdm)
+
+        # Attach the full API response to each instance for sample logging
+        eval_logger.info(
+            f"[EVE_API] Attaching full responses to {len(requests)} instances"
+        )
+
+        for instance, result in zip(requests, results):
+            # Get the original arguments (context/query, gen_kwargs)
+            if hasattr(instance, "args") and len(instance.args) >= 2:
+                context, gen_kwargs = instance.args[0], instance.args[1]
+
+                try:
+                    # Use context as the storage key (same as in amodel_call)
+                    # Convert JsonChatStr to string if needed
+                    lookup_key = context
+                    if hasattr(lookup_key, 'prompt'):
+                        lookup_key = lookup_key.prompt
+
+                    with self._storage_lock:
+                        api_data = self._response_storage.get(lookup_key)
+                        storage_info = f"lookup_key type: {type(lookup_key).__name__}, storage keys count: {len(self._response_storage)}"
+
+                    if api_data is not None:
+                        # Attach the full API data (request + response) to the instance
+                        # This will be included in samples output
+                        instance.eve_api_request = api_data["request"]
+                        instance.eve_api_response = api_data["response"]
+
+                        eval_logger.debug(
+                            f"[EVE_API] Attached full response to instance {instance.idx}"
+                        )
+                    else:
+                        # Try to extract query for debugging
+                        try:
+                            if isinstance(lookup_key, str):
+                                try:
+                                    messages = json.loads(lookup_key)
+                                    if isinstance(messages, list) and len(messages) > 0:
+                                        query = "\n".join(
+                                            [
+                                                msg.get("content", "")
+                                                for msg in messages
+                                                if "content" in msg
+                                            ]
+                                        )
+                                    else:
+                                        query = lookup_key
+                                except (json.JSONDecodeError, TypeError):
+                                    query = lookup_key
+                            else:
+                                query = str(lookup_key)
+                        except Exception:
+                            query = "unknown"
+
+                        eval_logger.warning(
+                            f"[EVE_API] Could not find stored response for instance {instance.idx}, "
+                            f"lookup_key (first 50 chars): {str(lookup_key)[:50]}, {storage_info}"
+                        )
+                        instance.eve_api_request = {"query": query[:100] + "..." if len(query) > 100 else query}
+                        instance.eve_api_response = {
+                            "error": "Response not found in storage",
+                            "debug_info": storage_info
+                        }
+
+                except Exception as e:
+                    eval_logger.warning(
+                        f"[EVE_API] Could not attach response to instance: {e}"
+                    )
+                    import traceback
+                    eval_logger.error(traceback.format_exc())
+                    # Set a minimal response on error
+                    instance.eve_api_request = {"error": str(e)}
+                    instance.eve_api_response = {"error": str(e)}
+
+        eval_logger.info(f"[EVE_API] Successfully attached responses to all instances")
+        return results

@@ -656,6 +656,20 @@ def evaluate(
                         "target_hash": hash_string(str(target)),
                     }
                     example.update(metrics)
+
+                    # Include custom model-specific attributes (e.g., eve_api_request/response, api_request)
+                    # Check if any request has custom attributes and include them
+                    if requests:
+                        first_req = requests[0]
+                        # Check for Eve API specific fields
+                        if hasattr(first_req, 'eve_api_request'):
+                            example['eve_api_request'] = first_req.eve_api_request
+                        if hasattr(first_req, 'eve_api_response'):
+                            example['eve_api_response'] = first_req.eve_api_response
+                        # Check for generic api_request field (used by openai_completions_logged)
+                        if hasattr(first_req, 'api_request'):
+                            example['api_request'] = first_req.api_request
+
                     task_output.logged_samples.append(example)
                 for metric, value in metrics.items():
                     task_output.sample_metrics[(metric, filter_key)].append(value)
