@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from functools import cached_property
@@ -82,6 +83,7 @@ class LocalCompletionsAPI(TemplateAPI):
                 "temperature": temperature,
                 "stop": stop,
                 "seed": seed,
+                **self._extra_body,
                 **gen_kwargs,
             }
         else:
@@ -204,6 +206,7 @@ class LocalChatCompletion(LocalCompletionsAPI):
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stop": stop[:4],
+            **self._extra_body,
             **gen_kwargs,
         }
 
@@ -218,10 +221,10 @@ class LocalChatCompletion(LocalCompletionsAPI):
                 for choices in out["choices"]:
                     tmp[choices["index"]] = choices["message"]["content"]
             except Exception as e:
-                # account for cases that generation is blocked by content filter,
-                # which is common for Azure OpenAI Service,
-                # not sure if need to account for multiple choices
-                eval_logger.warning(f"Could not parse generations: {e}")
+                eval_logger.warning(
+                    f"Could not parse generations: {e}. "
+                    f"API response: {json.dumps(out) if isinstance(out, dict) else out}"
+                )
                 tmp = [""]
             res = res + tmp
         return res
