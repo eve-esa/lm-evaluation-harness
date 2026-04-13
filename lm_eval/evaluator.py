@@ -670,6 +670,19 @@ def evaluate(
                         if hasattr(first_req, 'api_request'):
                             example['api_request'] = first_req.api_request
 
+                        # Extract reasoning traces from ResponseWithReasoning objects
+                        reasoning_traces = []
+                        for req in requests:
+                            for resp_list in req.resps:
+                                if hasattr(resp_list, 'reasoning_content') and resp_list.reasoning_content:
+                                    reasoning_traces.append(resp_list.reasoning_content)
+                                elif isinstance(resp_list, list):
+                                    for r in resp_list:
+                                        if hasattr(r, 'reasoning_content') and r.reasoning_content:
+                                            reasoning_traces.append(r.reasoning_content)
+                        if reasoning_traces:
+                            example['reasoning_content'] = reasoning_traces
+
                     task_output.logged_samples.append(example)
                 for metric, value in metrics.items():
                     task_output.sample_metrics[(metric, filter_key)].append(value)

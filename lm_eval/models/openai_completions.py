@@ -13,6 +13,50 @@ from lm_eval.models.utils import handle_stop_sequences
 eval_logger = logging.getLogger(__name__)
 
 
+class ResponseWithReasoning(str):
+    """A str subclass that carries optional reasoning trace metadata.
+
+    Behaves exactly like a regular string for all downstream code (metrics,
+    filters, serialization) but allows the evaluator to extract the reasoning
+    content when saving samples.
+    """
+
+    def __new__(cls, content: str, reasoning_content: Optional[str] = None):
+        instance = super().__new__(cls, content)
+        instance.reasoning_content = reasoning_content
+        return instance
+
+
+def _extract_reasoning_from_message(message: dict) -> Optional[str]:
+    """Extract reasoning trace from a chat completion message across providers.
+
+    Checks fields in priority order:
+      1. reasoning_content  (vLLM, Mistral, DeepSeek, OpenAI legacy)
+      2. reasoning          (OpenRouter)
+      3. content blocks with type="thinking" (Anthropic/Claude via OpenAI-compat)
+    """
+    if not isinstance(message, dict):
+        return None
+
+    if message.get("reasoning_content"):
+        return message["reasoning_content"]
+
+    if message.get("reasoning"):
+        return message["reasoning"]
+
+    content = message.get("content")
+    if isinstance(content, list):
+        thinking_parts = [
+            block.get("thinking") or block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "thinking"
+        ]
+        if thinking_parts:
+            return "\n".join(thinking_parts)
+
+    return None
+
+
 @register_model("local-completions")
 class LocalCompletionsAPI(TemplateAPI):
     def __init__(
@@ -129,10 +173,9 @@ class LocalCompletionsAPI(TemplateAPI):
         if not isinstance(outputs, list):
             outputs = [outputs]
         for out in outputs:
-            print(out)
             tmp = [None] * len(out["choices"])
-            for choices in out["choices"]:
-                tmp[choices["index"]] = choices["text"]
+            for choice in out["choices"]:
+                tmp[choice["index"]] = ResponseWithReasoning(choice["text"])
             res = res + tmp
         return res
 
@@ -218,14 +261,18 @@ class LocalChatCompletion(LocalCompletionsAPI):
         for out in outputs:
             try:
                 tmp = [None] * len(out["choices"])
-                for choices in out["choices"]:
-                    tmp[choices["index"]] = choices["message"]["content"]
+                for choice in out["choices"]:
+                    content = choice["message"]["content"]
+                    reasoning = _extract_reasoning_from_message(choice["message"])
+                    tmp[choice["index"]] = ResponseWithReasoning(
+                        content or "", reasoning
+                    )
             except Exception as e:
                 eval_logger.warning(
                     f"Could not parse generations: {e}. "
                     f"API response: {json.dumps(out) if isinstance(out, dict) else out}"
                 )
-                tmp = [""]
+                tmp = [ResponseWithReasoning("")]
             res = res + tmp
         return res
 
